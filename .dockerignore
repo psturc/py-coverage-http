@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Coverage
+coverage-output/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test
+test/
+
+# Documentation
+README.md
+LICENSE
+
+# CI/CD
+.github/
+
+# Local test scripts
+test_client.py
+

@@ -1,0 +1,54 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: coverage-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coverage-demo
+  namespace: coverage-demo
+  labels:
+    app: coverage-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coverage-demo
+  template:
+    metadata:
+      labels:
+        app: coverage-demo
+    spec:
+      containers:
+      - name: app
+        image: localhost/py-coverage-http:test
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coverage-demo
+  namespace: coverage-demo
+spec:
+  selector:
+    app: coverage-demo
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    nodePort: 30080  # Fixed port for Kind mapping
+  type: NodePort
+

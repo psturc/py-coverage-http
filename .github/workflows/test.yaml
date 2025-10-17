@@ -1,0 +1,68 @@
+name: E2E Tests with Kind
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-e2e:
+    name: Run on Ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Create KinD Cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: kind
+          config: kind-config.yaml
+
+      - name: Build container image with Podman
+        run: |
+          # Define image name and tag
+          IMAGE_NAME="localhost/py-coverage-http:test"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+          # Build the image using Podman
+          podman build  --target test -t $IMAGE_NAME -f Dockerfile .
+      - name: Load image into KinD cluster
+        run: |
+          podman image save -o built-image.tar ${{ env.IMAGE_NAME }}
+          kind load image-archive built-image.tar
+      - name: Deploy application
+        run: |
+          # Apply the Kubernetes deployment manifest
+          kubectl apply -f k8s-deployment.yaml
+          # Wait for the deployment to be ready
+          kubectl wait --for=condition=Available deployment/coverage-demo -n coverage-demo --timeout=120s
+          # Wait for pod to be ready (important for coverage collection)
+          kubectl wait --for=condition=ready pod -n coverage-demo -l app=coverage-demo --timeout=60s
+      - name: Run E2E Tests
+        run: |
+          # Install Python dependencies
+          pip install -r requirements.txt
+          # Run tests with CI defaults:
+          # - GENERATE_HTML_REPORTS=false (default, saves time)
+          # - USE_KUBECTL=false (default, uses native Python port-forward)
+          # 
+          # Reports generated automatically (all with path remapping):
+          #   - coverage-output/coverage.xml (for Codecov)
+          #   - coverage-output/report_e2e_tests.txt (text summary)
+          #   - coverage-output/.coverage_e2e_tests (SQLite database)
+          cd test
+          pytest test_e2e.py -v
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./test/coverage-output/coverage.xml
+          flags: e2e-tests
+          fail_ci_if_error: false
+        # This step runs only on the main branch to avoid uploading reports from forks without a secret.
+        if: github.repository == 'psturc/py-coverage-http'
