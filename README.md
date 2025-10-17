@@ -2,6 +2,8 @@
 
 Collect Python code coverage from running applications via HTTP - no volumes, no writable filesystems, no deployment modifications needed.
 
+Inspired by [go-coverage-http](https://github.com/psturc/go-coverage-http) - now available for Python!
+
 ## Why?
 
 Traditional coverage collection requires:
@@ -18,6 +20,7 @@ Traditional coverage collection requires:
 * ✅ No deployment manifest changes
 * ✅ Just download `coverage_server.py` during build
 * ✅ Collect coverage via HTTP with provided client library
+* ✅ Works with any Python framework (Flask, Django, FastAPI, etc.)
 
 ## How it works
 
@@ -32,7 +35,9 @@ Traditional coverage collection requires:
 * 🚀 **HTTP Coverage Server** - Automatically exposes coverage via HTTP
 * 🔌 **Client Library** - Collects coverage via kubectl port-forward or native Python
 * 🔍 **Pod Discovery** - Automatically find pods by label selector (no hardcoded names!)
-* 📊 **Report Generation** - Generate text and HTML coverage reports
+* 🗺️ **Auto Path Remapping** - Automatically maps container paths to local paths
+* 📊 **Report Generation** - Generate text, HTML, and XML (Codecov) reports
+* 🎭 **Smart Filtering** - Excludes instrumentation code from coverage
 * 🐳 **Kubernetes-friendly** - No volumes, no writable filesystem needed
 * 💾 **In-Memory Storage** - Coverage data stored in memory, retrieved via HTTP
 * 🌐 **Framework Agnostic** - Flask, Django, FastAPI, or plain Python scripts
@@ -78,35 +83,41 @@ from client.coverage_client import CoverageClient
 # Create client
 client = CoverageClient(namespace="default", output_dir="./coverage-output")
 
-# Option A: Discover pod automatically by label
+# Discover pod automatically by label (no hardcoded names!)
 pod_name = CoverageClient.get_pod_name("default", label_selector="app=my-app")
 
-# Option B: Use a known pod name
-pod_name = "my-pod-574fb6f489-abc12"
-
-# Collect from Kubernetes pod (uses kubectl binary by default)
-client.collect_coverage_from_pod(
-    pod_name=pod_name,
-    test_name="my-test",
-    coverage_port=9095
-)
-
-# Or use native Python port-forward (no kubectl binary required!)
+# Collect coverage from pod
 client.collect_coverage_from_pod(
     pod_name=pod_name,
     test_name="my-test",
     coverage_port=9095,
-    use_kubectl=False  # Use native Python
+    use_kubectl=False  # Native Python (no kubectl binary needed!)
 )
 
-# Generate reports with automatic path remapping
-client.generate_coverage_report("my-test")
-client.generate_html_report("my-test")
+# Generate reports (paths automatically remapped from container to local)
+client.generate_coverage_report("my-test")  # Text report
+client.generate_html_report("my-test")      # HTML report
+client.generate_xml_report("my-test")       # XML for Codecov
 ```
 
-### 3. Upload Coverage to Codecov (Optional)
+**Key features:**
+- 🔍 Auto pod discovery (no hardcoded names)
+- 🗺️ Auto path remapping (container → local paths)
+- 🎭 Auto excludes instrumentation code
+- 📊 Multiple report formats (text, HTML, XML)
 
-Coverage data can be easily uploaded to Codecov via GitHub Actions. See the workflow example in this repository.
+### 3. Upload to Codecov (Optional)
+
+```yaml
+# .github/workflows/test.yaml
+- name: Upload coverage to Codecov
+  uses: codecov/codecov-action@v4
+  with:
+    files: ./test/coverage-output/coverage.xml
+    token: ${{ secrets.CODECOV_TOKEN }}
+```
+
+See [`.github/workflows/test.yaml`](.github/workflows/test.yaml) for a complete example.
 
 ## Complete Example
 
@@ -204,101 +215,54 @@ client.collect_coverage_from_pod(pod_name=pod_name, test_name="test1")
 
 ### Port-Forwarding Methods
 
-The `CoverageClient` supports two methods for port-forwarding:
+The client supports two methods:
 
-### kubectl Binary Method (Default, Recommended)
+| Method | Pros | Cons |
+|--------|------|------|
+| **kubectl binary** (default) | Battle-tested, reliable | Requires kubectl binary |
+| **Native Python** (`use_kubectl=False`) | No binary deps, pure Python | Requires `kubernetes` package |
 
-```python
-client.collect_coverage_from_pod(
-    pod_name="my-pod",
-    test_name="test"
-    # use_kubectl=True  # Default
-)
-```
-
-**Requires**: `kubectl` binary in PATH
-
-**Pros**:
-- ✅ Battle-tested and reliable
-- ✅ Works everywhere kubectl works
-- ✅ No additional Python packages needed
-- ✅ Proven in production
-
-**Cons**:
-- ⚠️ Requires kubectl binary installed
-
-### Native Python Port-Forward (Works!)
-
-```python
-client.collect_coverage_from_pod(
-    pod_name="my-pod",
-    test_name="test",
-    use_kubectl=False  # Use native Python
-)
-```
-
-**Requires**: `pip install kubernetes`
-
-**Pros**:
-- ✅ No external binary dependencies (no kubectl required!)
-- ✅ Pure Python solution
-- ✅ Now fully functional
-
-**Cons**:
-- ⚠️ Requires kubernetes Python package
-- ⚠️ Slightly less battle-tested than kubectl
-
-**Recommendation**: kubectl (default) is more proven, but native Python works great if you prefer no binary dependencies.
+Both methods work reliably. Use `use_kubectl=False` for pure Python environments.
 
 ## How It Works
 
-### Coverage Server
+**Simple 3-step process:**
 
-The `coverage_server.py` wrapper:
-
-1. Starts Python `coverage` in-memory mode (no file writes)
-2. Imports and runs your application in a background thread
-3. Starts an HTTP server on `COVERAGE_PORT`
-4. Provides endpoints to dump coverage data as base64-encoded JSON
-
-### Client Library
-
-The `CoverageClient`:
-
-1. Uses `kubectl port-forward` to connect to the pod
-2. Fetches coverage data from `/coverage` endpoint
-3. Decodes and saves coverage files locally
-4. Generates text and HTML reports using Python's `coverage` library
-
-## Architecture
+1. **Coverage Server** wraps your app, starts HTTP server on port 9095
+2. **Port-Forward** connects test runner to pod (kubectl or native Python)
+3. **Client Library** fetches coverage, generates reports with auto path remapping
 
 ```
-┌─────────────────────────────────────────┐
-│  Kubernetes Pod                         │
-│  ┌───────────────────────────────────┐  │
-│  │ coverage_server.py (wrapper)      │  │
-│  │                                   │  │
-│  │  ┌─────────────────────────────┐  │  │
-│  │  │ Your Application (app.py)   │  │  │
-│  │  │ Running on port 8080        │  │  │
-│  │  └─────────────────────────────┘  │  │
-│  │                                   │  │
-│  │  Coverage HTTP Server (9095)     │  │
-│  │  - /coverage                     │  │
-│  │  - /health                       │  │
-│  └───────────────────────────────────┘  │
-└─────────────────────────────────────────┘
-                  │
-                  │ kubectl port-forward
-                  │
-┌─────────────────▼─────────────────────┐
-│  Test Runner                          │
-│  ┌─────────────────────────────────┐  │
-│  │ CoverageClient                  │  │
-│  │ - Port-forward to pod           │  │
-│  │ - Fetch coverage via HTTP       │  │
-│  │ - Generate reports              │  │
-│  └─────────────────────────────────┘  │
-└───────────────────────────────────────┘
+┌─────────────────────────┐
+│  Kubernetes Pod         │
+│  coverage_server.py     │
+│  ├─ Your App (8080)     │
+│  └─ HTTP Server (9095)  │
+└──────────┬──────────────┘
+           │ Port-forward
+┌──────────▼──────────────┐
+│  Test Runner            │
+│  CoverageClient         │
+│  ├─ Fetch via HTTP      │
+│  ├─ Remap paths         │
+│  └─ Generate reports    │
+└─────────────────────────┘
 ```
+
+For technical details, see [TECHNICAL.md](TECHNICAL.md).
+
+## Documentation
+
+- **[README.md](README.md)** (this file) - Quick start and usage guide
+- **[TECHNICAL.md](TECHNICAL.md)** - Architecture, implementation details, troubleshooting
+- **[.github/workflows/test.yaml](.github/workflows/test.yaml)** - CI/CD example with Codecov
+- **[test/test_e2e.py](test/test_e2e.py)** - Complete E2E test example
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Credits
+
+Inspired by [go-coverage-http](https://github.com/psturc/go-coverage-http) by the same author.
 

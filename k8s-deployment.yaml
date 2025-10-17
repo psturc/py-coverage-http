@@ -29,6 +29,13 @@ spec:
         - containerPort: 8080
           name: http
           protocol: TCP
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
         resources:
           requests:
             memory: "128Mi"

@@ -35,6 +35,8 @@ COPY server/coverage_server.py /opt/coverage_server.py
 # Environment variables for test
 ENV COVERAGE_PORT=9095
 
+USER 65532:65532
+
 # Command for test mode - Run app.py through the coverage wrapper
 # The wrapper is completely application-agnostic!
 CMD ["python", "/opt/coverage_server.py", "/app/app.py"]

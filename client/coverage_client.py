@@ -482,9 +482,8 @@ class CoverageClient:
         
         # Apply path remapping if needed
         if remap_paths:
-            local_path = os.path.abspath(source_dir) + "/"
-            # Create new remapped data
-            remapped_bytes = self._remap_coverage_paths(cov_data.dumps(), "/app/", local_path)
+            # Auto-detect container paths and remap to source_dir
+            remapped_bytes = self._remap_coverage_paths(cov_data.dumps(), source_dir=source_dir)
             new_db_path = tempfile.mktemp(suffix='.db')
             cov_data = CoverageData(basename=new_db_path)
             cov_data.loads(remapped_bytes)
@@ -529,9 +528,8 @@ class CoverageClient:
         
         # Apply path remapping if needed
         if remap_paths:
-            local_path = os.path.abspath(source_dir) + "/"
-            # Create new remapped data
-            remapped_bytes = self._remap_coverage_paths(cov_data.dumps(), "/app/", local_path)
+            # Auto-detect container paths and remap to source_dir
+            remapped_bytes = self._remap_coverage_paths(cov_data.dumps(), source_dir=source_dir)
             new_db_path = tempfile.mktemp(suffix='.db')
             cov_data = CoverageData(basename=new_db_path)
             cov_data.loads(remapped_bytes)
@@ -573,9 +571,8 @@ class CoverageClient:
         
         # Apply path remapping if needed
         if remap_paths:
-            local_path = os.path.abspath(source_dir) + "/"
-            # Create new remapped data
-            remapped_bytes = self._remap_coverage_paths(cov_data.dumps(), "/app/", local_path)
+            # Auto-detect container paths and remap to source_dir
+            remapped_bytes = self._remap_coverage_paths(cov_data.dumps(), source_dir=source_dir)
             new_db_path = tempfile.mktemp(suffix='.db')
             cov_data = CoverageData(basename=new_db_path)
             cov_data.loads(remapped_bytes)
@@ -626,14 +623,145 @@ class CoverageClient:
         
         print(f"[coverage-client] Merged coverage saved to {merged_file}")
     
-    def _remap_coverage_paths(self, coverage_bytes: bytes, container_path: str = "/app/", local_path: str = None):
+    def _detect_container_paths(self, coverage_data, source_dir: str = ".") -> dict:
+        """
+        Auto-detect container path mappings by analyzing coverage data.
+        Uses intelligent matching based on relative path structure.
+        
+        Args:
+            coverage_data: CoverageData object
+            source_dir: Local source directory to search for matching files
+        
+        Returns a dictionary mapping container paths to local paths.
+        For example: {'/app/': '/Users/user/project/'}
+        """
+        import os
+        from pathlib import Path
+        from collections import defaultdict
+        
+        measured_files = sorted(coverage_data.measured_files())  # Sort for determinism
+        container_files = []
+        
+        # Find files that don't exist locally (these are container paths)
+        for file_path in measured_files:
+            if not os.path.exists(file_path):
+                container_files.append(file_path)
+        
+        if not container_files:
+            # No container paths detected - all files already have local paths
+            return {}
+        
+        # Build a map of relative paths to local file paths
+        # Key: relative path parts (tuple), Value: full local path
+        source_path = Path(source_dir).resolve()
+        local_files_by_relpath = {}
+        
+        # Collect all local Python files with their relative path structure
+        for local_file in sorted(source_path.rglob("*.py")):  # Sort for determinism
+            rel_path = local_file.relative_to(source_path)
+            # Store using path parts for better matching
+            path_parts = rel_path.parts
+            local_files_by_relpath[path_parts] = str(local_file)
+        
+        # Try to find the best common container root by matching directory structures
+        # Group container files by potential root paths
+        potential_mappings = defaultdict(list)  # {container_root: [(container_file, local_file)]}
+        
+        for container_file in container_files:
+            container_path = Path(container_file)
+            container_parts = container_path.parts
+            filename = container_path.name
+            
+            # Try to find matching local file based on path structure
+            best_match = None
+            best_match_score = 0
+            
+            for local_parts, local_path in local_files_by_relpath.items():
+                # Files must have same name
+                if local_parts[-1] != filename:
+                    continue
+                
+                # Count matching suffix parts (from filename backwards)
+                match_score = 0
+                for i in range(1, min(len(container_parts), len(local_parts)) + 1):
+                    if container_parts[-i] == local_parts[-i]:
+                        match_score = i
+                    else:
+                        break
+                
+                # Prefer longer matches (more specific paths)
+                if match_score > best_match_score:
+                    best_match_score = match_score
+                    best_match = (local_parts, local_path)
+            
+            if best_match:
+                local_parts, local_path = best_match
+                
+                # Extract the container root by removing the matched suffix
+                # For /app/hello/page/views.py matching to .../hello/page/views.py
+                # Container root is /app/ 
+                container_root_parts = container_parts[:-best_match_score]
+                if container_root_parts:
+                    # Build container root with proper path joining
+                    container_root = os.path.join('/', *container_root_parts) + '/'
+                    
+                    # Build local root with proper path joining
+                    local_root_parts = Path(local_path).parts[:-best_match_score]
+                    if local_root_parts:
+                        local_root = os.path.join(*local_root_parts) + '/'
+                        potential_mappings[container_root].append((container_file, local_path))
+        
+        # Select the most common container root (the one with the most matches)
+        # This gives us the primary mapping like /app/ -> /Users/.../project/
+        path_mappings = {}
+        
+        if potential_mappings:
+            # Sort by number of matches (descending), then alphabetically for determinism
+            sorted_roots = sorted(
+                potential_mappings.items(),
+                key=lambda x: (-len(x[1]), x[0])  # More matches first, then alphabetically
+            )
+            
+            # Use the root with the most matches
+            best_root, matches = sorted_roots[0]
+            
+            # Find the local root by analyzing the matches
+            if matches:
+                container_file, first_local = matches[0]
+                
+                # Calculate how many path parts match
+                container_parts = Path(container_file).parts
+                local_parts = Path(first_local).parts
+                
+                # Find matching suffix length
+                match_len = 0
+                for i in range(1, min(len(container_parts), len(local_parts)) + 1):
+                    if container_parts[-i] == local_parts[-i]:
+                        match_len = i
+                    else:
+                        break
+                
+                # Calculate local root: remove the matching suffix from local path
+                local_root_parts = local_parts[:-match_len]
+                if local_root_parts:
+                    # Use os.path.join for proper path construction
+                    local_root = os.path.join(*local_root_parts)
+                    if not local_root.startswith('/'):
+                        local_root = '/' + local_root
+                    if not local_root.endswith('/'):
+                        local_root += '/'
+                    path_mappings[best_root] = local_root
+        
+        return path_mappings
+    
+    def _remap_coverage_paths(self, coverage_bytes: bytes, source_dir: str = "."):
         """
         Remap coverage paths from container to local filesystem.
+        Automatically detects container paths by analyzing the coverage data.
         
         Args:
             coverage_bytes: Coverage data in binary format
-            container_path: Path prefix in container (e.g., '/app/')
-            local_path: Local path prefix (defaults to current directory)
+            source_dir: Local source directory to search for matching files
         
         Returns:
             New coverage data with remapped paths (as bytes)
@@ -642,13 +770,18 @@ class CoverageClient:
         import os
         import tempfile
         
-        if local_path is None:
-            local_path = os.getcwd() + "/"
-        
         # Load original coverage data using a temp database
         tmp_db_path = tempfile.mktemp(suffix='.db')
         original_data = CoverageData(basename=tmp_db_path)
         original_data.loads(coverage_bytes)
+        
+        # Auto-detect container paths
+        path_mappings = self._detect_container_paths(original_data, source_dir)
+        
+        if path_mappings:
+            print(f"[coverage-client] Auto-detected path mappings: {path_mappings}")
+        else:
+            print(f"[coverage-client] No container paths detected, using paths as-is")
         
         # Create new coverage data with remapped paths using a different temp database
         new_db_path = tempfile.mktemp(suffix='.db')
@@ -656,28 +789,28 @@ class CoverageClient:
         
         # Remap each measured file
         for old_file in original_data.measured_files():
-            if old_file.startswith(container_path):
-                new_file = old_file.replace(container_path, local_path, 1)
-                # Only include if local file exists
-                if os.path.exists(new_file):
-                    # Get coverage data
-                    lines = original_data.lines(old_file)
-                    if lines:
-                        new_data.add_lines({new_file: lines})
-                    
-                    arcs = original_data.arcs(old_file)
-                    if arcs:
-                        new_data.add_arcs({new_file: list(arcs)})
-            else:
-                # Keep non-container paths only if they exist locally
-                if os.path.exists(old_file):
-                    lines = original_data.lines(old_file)
-                    if lines:
-                        new_data.add_lines({old_file: lines})
-                    
-                    arcs = original_data.arcs(old_file)
-                    if arcs:
-                        new_data.add_arcs({old_file: list(arcs)})
+            # Skip coverage server and other instrumentation files
+            if 'coverage_server.py' in old_file or '/site-packages/' in old_file:
+                continue
+            
+            new_file = old_file
+            
+            # Try each path mapping
+            for container_prefix, local_prefix in path_mappings.items():
+                if old_file.startswith(container_prefix):
+                    new_file = old_file.replace(container_prefix, local_prefix, 1)
+                    break
+            
+            # Only include if local file exists
+            if os.path.exists(new_file):
+                # Get coverage data
+                lines = original_data.lines(old_file)
+                if lines:
+                    new_data.add_lines({new_file: lines})
+                
+                arcs = original_data.arcs(old_file)
+                if arcs:
+                    new_data.add_arcs({new_file: list(arcs)})
         
         # Serialize and return
         return new_data.dumps()

@@ -48,11 +48,11 @@ class CoverageHandler(BaseHTTPRequestHandler):
         label = query.get("name", ["session"])[0]
 
         if path == "/coverage":
-            print(f"{PRINT_PREFIX} Coverage dump requested (label={label})")
+            print(f"{PRINT_PREFIX} Coverage dump requested (label={label})", flush=True)
             cov.stop()
             cov.save()
 
-            # Dump coverage data as base64-encoded JSON
+            # Dump in-memory coverage data as base64-encoded JSON
             data = cov.get_data()
             json_bytes = data.dumps()
             json_b64 = base64.b64encode(json_bytes).decode('ascii')
@@ -74,7 +74,7 @@ class CoverageHandler(BaseHTTPRequestHandler):
             return
 
         elif path == "/health":
-            print(f"{PRINT_PREFIX} Health check requested")
+            print(f"{PRINT_PREFIX} Health check requested", flush=True)
             payload = {
                 "status": "ok",
                 "coverage_enabled": True,
@@ -89,7 +89,7 @@ class CoverageHandler(BaseHTTPRequestHandler):
             return
 
         elif path == "/coverage/reset":
-            print(f"{PRINT_PREFIX} Coverage reset requested")
+            print(f"{PRINT_PREFIX} Coverage reset requested", flush=True)
             cov.stop()
             cov.erase()
             cov.start()
@@ -113,7 +113,7 @@ def run_server():
         daemon_threads = True
 
     server = ThreadedHTTPServer(("0.0.0.0", COVERAGE_PORT), CoverageHandler)
-    print(f"{PRINT_PREFIX} HTTP server listening on port {COVERAGE_PORT}")
+    print(f"{PRINT_PREFIX} HTTP server listening on port {COVERAGE_PORT}", flush=True)
     server.serve_forever()
 
 
@@ -126,10 +126,21 @@ def main():
         print(f"       python {sys.argv[0]} -m module [args...]")
         sys.exit(1)
 
-    # Start coverage collection (in-memory, no file writes)
-    cov = coverage.Coverage(data_file=None, auto_data=False)
+    # Start coverage collection (in-memory, no filesystem writes)
+    # Note: With read-only filesystem + Gunicorn, coverage is limited to:
+    # - Startup code (imports, config loading)
+    # - Code executed in master process before forking
+    # Request handlers in worker processes won't be captured without /tmp access
+    cov = coverage.Coverage(
+        data_file=None,  # In-memory only (no filesystem writes)
+        auto_data=False,
+        omit=[
+            '*/coverage_server.py',  # Exclude this wrapper
+            '*/site-packages/*',      # Exclude installed packages
+        ]
+    )
     cov.start()
-    print(f"{PRINT_PREFIX} Coverage collection started")
+    print(f"{PRINT_PREFIX} Coverage collection started (in-memory, limited to master process)", flush=True)
 
     # Start HTTP server in background thread
     server_thread = Thread(target=run_server, daemon=True)
@@ -142,13 +153,13 @@ def main():
     if script_args[0] == '-m' and len(script_args) > 1:
         module_name = script_args[1]
         sys.argv = [module_name] + script_args[2:]
-        print(f"{PRINT_PREFIX} Running module: {module_name}")
+        print(f"{PRINT_PREFIX} Running module: {module_name}", flush=True)
         runpy.run_module(module_name, run_name="__main__", alter_sys=True)
     else:
         # Run as script
         script_path = script_args[0]
         sys.argv = script_args
-        print(f"{PRINT_PREFIX} Running script: {script_path}")
+        print(f"{PRINT_PREFIX} Running script: {script_path}", flush=True)
         
         # Add script directory to path
         script_dir = os.path.dirname(os.path.abspath(script_path))
@@ -163,12 +174,12 @@ if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print(f"\n{PRINT_PREFIX} Shutting down...")
+        print(f"\n{PRINT_PREFIX} Shutting down...", flush=True)
         if cov:
             cov.stop()
         sys.exit(0)
     except Exception as e:
-        print(f"{PRINT_PREFIX} Error: {e}")
+        print(f"{PRINT_PREFIX} Error: {e}", flush=True)
         if cov:
             cov.stop()
         raise
