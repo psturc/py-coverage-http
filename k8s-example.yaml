@@ -1,0 +1,87 @@
+# Kubernetes deployment example for py-coverage-http
+# This shows how to deploy a Flask app with coverage collection enabled
+#
+# Key points:
+# - Uses readOnlyRootFilesystem: true for security
+# - NO extra volumes needed! /dev/shm is writable by default in K8s
+# - Coverage data stored in /dev/shm (shared memory)
+# - TMPDIR=/dev/shm makes Gunicorn use /dev/shm for temp files too
+# - Coverage HTTP endpoint exposed on port 9095
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coverage-demo
+  labels:
+    app: coverage-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coverage-demo
+  template:
+    metadata:
+      labels:
+        app: coverage-demo
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          # Build with: docker build --target test -t coverage-demo:test .
+          image: localhost/python-app:test
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: coverage
+              containerPort: 9095
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true  # ✅ Secure! /dev/shm still works!
+            capabilities:
+              drop:
+                - ALL
+          # No volumeMounts needed! TMPDIR=/dev/shm is set in the image
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: coverage
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          # No volumes needed - /dev/shm is always available in K8s!
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coverage-demo
+spec:
+  selector:
+    app: coverage-demo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: coverage
+      port: 9095
+      targetPort: coverage
+  type: ClusterIP

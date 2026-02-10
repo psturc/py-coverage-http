@@ -1,0 +1,40 @@
+# .coveragerc - Coverage configuration for multiprocess environments
+# This config enables coverage collection across Gunicorn workers
+# using /dev/shm (writable even with readOnlyRootFilesystem in K8s)
+
+[run]
+# Store data in /dev/shm (shared memory filesystem)
+# This is ALWAYS writable in Linux containers, even with readOnlyRootFilesystem!
+# For local macOS testing, set COVERAGE_DATA_DIR=/tmp/coverage-test
+data_file = /dev/shm/.coverage
+
+# Track which source files to measure
+source = /app
+
+# Enable parallel mode - each process writes its own file
+# Files are named: .coverage.<hostname>.<pid>.<random>
+parallel = True
+
+# Support multiprocessing (Gunicorn workers)
+concurrency = multiprocessing
+
+# Omit coverage wrapper and installed packages
+omit =
+    */coverage_server*.py
+    */sitecustomize.py
+    */gunicorn_coverage.py
+    */site-packages/*
+    */dist-packages/*
+
+[report]
+# Exclude common non-testable patterns
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+
+[paths]
+# Path mappings for container -> local remapping
+source =
+    /app/
+    .
