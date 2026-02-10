@@ -15,65 +15,98 @@ Traditional coverage collection requires:
 
 **This solution eliminates all of that:**
 
-* ✅ No writable filesystem needed (coverage stored in-memory)
+* ✅ Works with `readOnlyRootFilesystem: true` (uses `/dev/shm`)
 * ✅ No volume mounts required
 * ✅ No deployment manifest changes
-* ✅ Just download `coverage_server.py` during build
+* ✅ Just download instrumentation files during build
 * ✅ Collect coverage via HTTP with provided client library
 * ✅ Works with any Python framework (Flask, Django, FastAPI, etc.)
+* ✅ **Supports Gunicorn and multi-process applications**
 
 ## How it works
 
-1. **Build time**: Download `coverage_server.py` and include it in your test Docker image
-2. **Runtime**: Coverage server automatically starts on port 9095, wraps your application
+1. **Build time**: Download instrumentation files and include in your test Docker image
+2. **Runtime**: Coverage collection starts automatically in all processes (including Gunicorn workers)
 3. **Test time**: Client library collects coverage via HTTP port-forwarding
 4. **Result**: Coverage reports generated automatically
 
 ## Features
 
-* 🎯 **Pure Wrapper** - Completely application-agnostic! Works like `coverage run script.py`
-* 🚀 **HTTP Coverage Server** - Automatically exposes coverage via HTTP
+* 🎯 **Multi-Process Support** - Works with Gunicorn, uWSGI, and other WSGI servers
+* 🚀 **HTTP Coverage Server** - Automatically exposes combined coverage via HTTP
 * 🔌 **Client Library** - Collects coverage via kubectl port-forward or native Python
 * 🔍 **Pod Discovery** - Automatically find pods by label selector (no hardcoded names!)
 * 🗺️ **Auto Path Remapping** - Automatically maps container paths to local paths
 * 📊 **Report Generation** - Generate text, HTML, and XML (Codecov) reports
 * 🎭 **Smart Filtering** - Excludes instrumentation code from coverage
-* 🐳 **Kubernetes-friendly** - No volumes, no writable filesystem needed
-* 💾 **In-Memory Storage** - Coverage data stored in memory, retrieved via HTTP
+* 🐳 **Kubernetes-friendly** - Works with `readOnlyRootFilesystem: true`
+* 💾 **/dev/shm Storage** - Coverage data stored in shared memory (always writable)
 * 🌐 **Framework Agnostic** - Flask, Django, FastAPI, or plain Python scripts
 
 ## Quick Start
 
-### 1. Add Coverage Server to Your App
+### 1. Add Coverage Instrumentation to Your App
 
-The `coverage_server.py` is a **pure wrapper** - completely application-agnostic!  
-Just run your script through it like `coverage run`:
+Download the required instrumentation files:
 
-```dockerfile
-# Test image with coverage wrapper
-FROM base AS test
+```bash
+# Coverage HTTP server/wrapper
+curl -o server/coverage_server.py \
+  https://raw.githubusercontent.com/psturc/py-coverage-http/main/server/coverage_server.py
 
-# Install coverage dependency only in test build
-RUN pip install coverage
+# Auto-starts coverage in all Python processes (required for Gunicorn)
+curl -o server/sitecustomize.py \
+  https://raw.githubusercontent.com/psturc/py-coverage-http/main/server/sitecustomize.py
 
-# Download the pure coverage wrapper
-RUN wget https://raw.githubusercontent.com/psturc/py-coverage-http/main/server/coverage_server.py \
-    -O /opt/coverage_server.py
+# Gunicorn hooks to save coverage on worker exit
+curl -o server/gunicorn_coverage.py \
+  https://raw.githubusercontent.com/psturc/py-coverage-http/main/server/gunicorn_coverage.py
 
-# Environment variables
-ENV COVERAGE_PORT=9095
-
-# Run your app through the wrapper - completely application-agnostic!
-CMD ["python", "/opt/coverage_server.py", "/app/app.py"]
+# Coverage configuration for parallel/multiprocess mode
+curl -o server/.coveragerc \
+  https://raw.githubusercontent.com/psturc/py-coverage-http/main/server/.coveragerc
 ```
 
-The coverage wrapper will:
-- Start coverage collection
-- Execute your script (any Python file, any framework!)
-- Start HTTP server on port 9095 (configurable via `COVERAGE_PORT`)
-- Provide coverage data via HTTP endpoints
+Add a test stage to your Dockerfile:
 
-**Works with ANY Python application** - Flask, Django, FastAPI, or plain scripts!
+```dockerfile
+# Test image with coverage instrumentation
+FROM base AS test
+
+# Install coverage and gunicorn
+RUN pip install coverage>=7.0.0 gunicorn>=21.0.0
+
+# Install sitecustomize.py to auto-start coverage in ALL processes
+COPY server/sitecustomize.py /tmp/sitecustomize.py
+RUN SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    cp /tmp/sitecustomize.py "$SITE_PACKAGES/sitecustomize.py"
+
+# Copy coverage configuration and hooks
+COPY server/.coveragerc /app/.coveragerc
+COPY server/gunicorn_coverage.py /opt/gunicorn_coverage.py
+COPY server/coverage_server.py /opt/coverage_server.py
+
+# Environment configuration
+ENV COVERAGE_PROCESS_START=/app/.coveragerc
+ENV COVERAGE_PORT=9095
+ENV COVERAGE_DATA_DIR=/dev/shm
+ENV TMPDIR=/dev/shm  # Critical for readOnlyRootFilesystem!
+
+EXPOSE 9095
+
+# Run Gunicorn through coverage wrapper
+CMD ["python", "/opt/coverage_server.py", "-m", "gunicorn", \
+     "-c", "/opt/gunicorn_coverage.py", \
+     "-b", "0.0.0.0:8080", \
+     "-w", "1", \
+     "app:app"]
+```
+
+**Key points:**
+- `sitecustomize.py` ensures coverage starts in all processes (master + workers)
+- `gunicorn_coverage.py` saves coverage data when workers exit
+- `/dev/shm` is always writable, even with `readOnlyRootFilesystem: true`
+- `TMPDIR=/dev/shm` makes Gunicorn use shared memory for temp files
 
 ### 2. Collect Coverage from Tests
 
@@ -148,9 +181,12 @@ The E2E tests will:
 ### Example Files
 
 * `app.py` - Sample Flask application with test endpoints
-* `coverage_server.py` - Coverage wrapper (downloads from GitHub in production)
+* `server/coverage_server.py` - Coverage HTTP wrapper
+* `server/sitecustomize.py` - Auto-starts coverage in all processes
+* `server/gunicorn_coverage.py` - Gunicorn hooks for coverage
+* `server/.coveragerc` - Coverage configuration for multiprocessing
 * `Dockerfile` - Multi-stage build with test target
-* `k8s-deployment.yaml` - Kubernetes deployment manifest
+* `k8s-example.yaml` - Kubernetes deployment manifest (works with readOnlyRootFilesystem)
 * `test/test_e2e.py` - E2E tests with coverage collection
 * `client/coverage_client.py` - Client library for collecting coverage
 
@@ -169,26 +205,42 @@ The E2E tests will:
 ## Environment Variables
 
 * `COVERAGE_PORT` - Port for coverage HTTP server (default: `9095`)
+* `COVERAGE_DATA_DIR` - Directory for coverage data files (default: `/dev/shm`)
+* `COVERAGE_PROCESS_START` - Path to `.coveragerc` (enables multiprocessing)
+* `TMPDIR` - Temp directory for Gunicorn (set to `/dev/shm` for read-only filesystems)
+* `ENABLE_COVERAGE` - Set to `true` to enable coverage collection
 
 ## Usage
 
-The coverage wrapper is a pure command-line tool:
+The coverage wrapper supports multiple usage patterns:
 
 ```bash
-# Basic usage
+# Simple scripts
 python coverage_server.py app.py
 
-# With module syntax
+# With module syntax (recommended for Gunicorn)
+python coverage_server.py -m gunicorn -c gunicorn_coverage.py app:app
+
+# Flask development server
 python coverage_server.py -m flask run
 
-# Any Python script!
-python coverage_server.py path/to/your/script.py
-
-# Pass arguments to your script
+# Any Python script with arguments
 python coverage_server.py app.py --host 0.0.0.0 --port 8080
 ```
 
-All arguments after the script name are passed to your application.
+### Gunicorn (Recommended for Production-like Testing)
+
+For Gunicorn applications, use the full instrumentation setup:
+
+```bash
+python coverage_server.py -m gunicorn \
+    -c /opt/gunicorn_coverage.py \
+    -b 0.0.0.0:8080 \
+    -w 1 \
+    app:app
+```
+
+This ensures coverage is collected from all worker processes.
 
 ## Client Library Options
 
@@ -226,28 +278,39 @@ Both methods work reliably. Use `use_kubectl=False` for pure Python environments
 
 ## How It Works
 
-**Simple 3-step process:**
-
-1. **Coverage Server** wraps your app, starts HTTP server on port 9095
-2. **Port-Forward** connects test runner to pod (kubectl or native Python)
-3. **Client Library** fetches coverage, generates reports with auto path remapping
+**Multi-process coverage collection:**
 
 ```
-┌─────────────────────────┐
-│  Kubernetes Pod         │
-│  coverage_server.py     │
-│  ├─ Your App (8080)     │
-│  └─ HTTP Server (9095)  │
-└──────────┬──────────────┘
-           │ Port-forward
-┌──────────▼──────────────┐
-│  Test Runner            │
-│  CoverageClient         │
-│  ├─ Fetch via HTTP      │
-│  ├─ Remap paths         │
-│  └─ Generate reports    │
-└─────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Container (read-only FS)                  │
+├─────────────────────────────────────────────────────────────┤
+│   sitecustomize.py                                          │
+│   └─ coverage.process_startup() in EVERY process           │
+├─────────────────────────────────────────────────────────────┤
+│   Gunicorn                                                  │
+│   ├─ Master (pid 1)                                         │
+│   └─ Worker (pid N) ─── handles requests                    │
+│                                                              │
+│   gunicorn_coverage.py hooks:                                │
+│   └─ worker_exit: saves coverage to /dev/shm                │
+├─────────────────────────────────────────────────────────────┤
+│   /dev/shm/ (always writable in K8s!)                        │
+│   └─ .coverage.<hostname>.<pid>.<random>                    │
+├─────────────────────────────────────────────────────────────┤
+│   coverage_server.py (HTTP endpoint :9095)                   │
+│   └─ GET /coverage → combines files → returns JSON          │
+└─────────────────────────────────────────────────────────────┘
+           │ Port-forward (kubectl or native Python)
+┌──────────▼──────────────────────────────────────────────────┐
+│  Test Runner / CI Environment                                │
+│  CoverageClient                                              │
+│  ├─ Fetch combined coverage via HTTP                        │
+│  ├─ Auto-remap container paths to local paths               │
+│  └─ Generate reports (text, HTML, XML)                      │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+**Key insight**: `/dev/shm` (shared memory) is always writable in Kubernetes, even with `readOnlyRootFilesystem: true`!
 
 For technical details, see [TECHNICAL.md](TECHNICAL.md).
 

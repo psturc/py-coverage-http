@@ -10,105 +10,180 @@ This document provides technical details about the implementation of py-coverage
 - [Auto Path Detection](#auto-path-detection)
 - [Coverage Data Format](#coverage-data-format)
 - [Port-Forwarding Implementations](#port-forwarding-implementations)
+- [Multi-Process Coverage Flow](#multi-process-coverage-flow)
 - [Testing Strategy](#testing-strategy)
+- [Troubleshooting](#troubleshooting)
 
 ## Architecture Overview
 
 ### Component Diagram
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Kubernetes Pod (Test Build)                             │
-│                                                           │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ coverage_server.py (Pure Wrapper)                  │  │
-│  │                                                     │  │
-│  │  • Starts coverage.Coverage(data_file=None)        │  │
-│  │  • Excludes: */coverage_server.py, */site-packages│  │
-│  │  • Runs target app via runpy.run_path()           │  │
-│  │  • HTTP server on port 9095 (configurable)        │  │
-│  │                                                     │  │
-│  │  ┌───────────────────────────────────────────┐    │  │
-│  │  │ Your Application (e.g., Flask app)        │    │  │
-│  │  │ • app.py running on port 8080             │    │  │
-│  │  │ • Coverage automatically tracked          │    │  │
-│  │  └───────────────────────────────────────────┘    │  │
-│  │                                                     │  │
-│  │  HTTP Endpoints:                                   │  │
-│  │  • GET /coverage?name=<test> → Coverage data      │  │
-│  │  • GET /health → Server health check              │  │
-│  │  • GET /coverage/reset → Reset counters           │  │
-│  └────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
-                            │
-                            │ kubectl port-forward 9095:9095
-                            │ (or native Python port-forward)
-                            ▼
-┌──────────────────────────────────────────────────────────┐
-│  Test Runner / CI Environment                            │
-│                                                           │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ CoverageClient (client/coverage_client.py)         │  │
-│  │                                                     │  │
-│  │  1. Pod Discovery (optional)                       │  │
-│  │     • CoverageClient.get_pod_name()                │  │
-│  │     • Uses kubernetes.client.CoreV1Api             │  │
-│  │     • Filters by label selector                    │  │
-│  │                                                     │  │
-│  │  2. Port-Forward Setup                             │  │
-│  │     • kubectl binary (default): subprocess.Popen   │  │
-│  │     • Native Python: kubernetes.stream.portforward │  │
-│  │                                                     │  │
-│  │  3. Coverage Collection                            │  │
-│  │     • HTTP GET /coverage                           │  │
-│  │     • Decode base64 → SQLite format                │  │
-│  │     • Save as .coverage_<test_name>                │  │
-│  │                                                     │  │
-│  │  4. Path Remapping (Auto-Detection)                │  │
-│  │     • Analyze coverage data for non-existent paths │  │
-│  │     • Match by filename in source_dir              │  │
-│  │     • Map: /app/ → /local/path/                    │  │
-│  │     • Exclude: coverage_server.py, site-packages   │  │
-│  │                                                     │  │
-│  │  5. Report Generation                              │  │
-│  │     • Text: coverage.report()                      │  │
-│  │     • HTML: coverage.html_report()                 │  │
-│  │     • XML: coverage.xml_report() (Codecov)         │  │
-│  └────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Kubernetes Pod (Test Build) - readOnlyRootFilesystem: true             │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐ │
+│  │ Python site-packages/sitecustomize.py                              │ │
+│  │ └─ Automatically calls coverage.process_startup() in ALL processes │ │
+│  └────────────────────────────────────────────────────────────────────┘ │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐ │
+│  │ Gunicorn with gunicorn_coverage.py hooks                           │ │
+│  │                                                                     │ │
+│  │  Master Process (pid 1)                                            │ │
+│  │  └─ coverage started via sitecustomize.py                          │ │
+│  │                                                                     │ │
+│  │  Worker Process (pid N) ─── fork() ───                             │ │
+│  │  ├─ coverage started via sitecustomize.py                          │ │
+│  │  ├─ handles HTTP requests                                          │ │
+│  │  └─ on exit: worker_exit hook saves to /dev/shm/.coverage.*       │ │
+│  └────────────────────────────────────────────────────────────────────┘ │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐ │
+│  │ /dev/shm/ (shared memory - ALWAYS writable!)                       │ │
+│  │ ├─ .coverage.<hostname>.<pid1>.<random1>                           │ │
+│  │ ├─ .coverage.<hostname>.<pid2>.<random2>                           │ │
+│  │ └─ ... (one file per worker process)                               │ │
+│  └────────────────────────────────────────────────────────────────────┘ │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐ │
+│  │ coverage_server.py (HTTP endpoint :9095)                           │ │
+│  │ • GET /coverage → combines all .coverage.* files → returns JSON   │ │
+│  │ • GET /health → server health check                                │ │
+│  │ • GET /coverage/reset → clears coverage files                      │ │
+│  └────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────┘
+                              │
+                              │ kubectl port-forward 9095:9095
+                              │ (or native Python port-forward)
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Test Runner / CI Environment                                            │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐ │
+│  │ CoverageClient (client/coverage_client.py)                         │ │
+│  │                                                                     │ │
+│  │  1. Pod Discovery (optional)                                       │ │
+│  │     • CoverageClient.get_pod_name()                                │ │
+│  │     • Uses kubernetes.client.CoreV1Api                             │ │
+│  │     • Filters by label selector                                    │ │
+│  │                                                                     │ │
+│  │  2. Port-Forward Setup                                             │ │
+│  │     • kubectl binary (default): subprocess.Popen                   │ │
+│  │     • Native Python: kubernetes.stream.portforward                 │ │
+│  │                                                                     │ │
+│  │  3. Coverage Collection                                            │ │
+│  │     • HTTP GET /coverage                                           │ │
+│  │     • Server combines all coverage files in /dev/shm               │ │
+│  │     • Decode base64 → SQLite format                                │ │
+│  │     • Save as .coverage_<test_name>                                │ │
+│  │                                                                     │ │
+│  │  4. Path Remapping (Auto-Detection)                                │ │
+│  │     • Analyze coverage data for non-existent paths                 │ │
+│  │     • Match by filename in source_dir                              │ │
+│  │     • Map: /app/ → /local/path/                                    │ │
+│  │     • Exclude: coverage_server.py, site-packages                   │ │
+│  │                                                                     │ │
+│  │  5. Report Generation                                              │ │
+│  │     • Text: coverage.report()                                      │ │
+│  │     • HTML: coverage.html_report()                                 │ │
+│  │     • XML: coverage.xml_report() (Codecov)                         │ │
+│  └────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Coverage Server Implementation
 
 ### Design Philosophy
 
-The coverage server is designed as a **pure wrapper** - completely application-agnostic, similar to running `coverage run script.py`.
+The coverage system is designed for **multi-process applications** (Gunicorn, uWSGI) running in **read-only Kubernetes environments**. It uses `/dev/shm` (shared memory) for coverage data storage, which is always writable even with `readOnlyRootFilesystem: true`.
 
 ### Key Components
 
-#### 1. In-Memory Coverage Storage
+#### 1. sitecustomize.py - Global Coverage Startup
+
+Installed in Python's `site-packages` to automatically start coverage in ALL processes:
 
 ```python
-cov = coverage.Coverage(
-    data_file=None,        # No file writes!
-    auto_data=False,       # Manual control
-    omit=[
-        '*/coverage_server.py',  # Exclude wrapper itself
-        '*/site-packages/*',      # Exclude dependencies
-    ]
-)
-cov.start()
+# server/sitecustomize.py
+import os
+if os.getenv("COVERAGE_PROCESS_START"):
+    try:
+        import coverage
+        coverage.process_startup()
+    except Exception:
+        pass
 ```
 
-**Why in-memory?**
-- Kubernetes pods may have read-only filesystems
-- Avoids need for volume mounts
-- Faster (no disk I/O)
-- Simpler cleanup
+**Why sitecustomize.py?**
+- Runs before any application code
+- Works with forked processes (Gunicorn workers)
+- Standard Python mechanism (no monkey-patching)
+- Controlled by `COVERAGE_PROCESS_START` env var
 
-#### 2. Application Execution
+#### 2. .coveragerc - Coverage Configuration
 
-Uses Python's `runpy` module to execute the target application with `__name__ == '__main__'`:
+```ini
+[run]
+branch = True
+parallel = True                    # Each process writes separate file
+concurrency = multiprocessing      # Handle multiprocessing correctly
+data_file = /dev/shm/.coverage     # Store in shared memory
+source = /app
+omit =
+    */site-packages/*
+    */coverage_server*.py
+    */sitecustomize.py
+    */gunicorn_coverage.py
+```
+
+**Why /dev/shm?**
+- Always writable in Kubernetes (even with read-only filesystem)
+- Shared memory = fast I/O
+- No volume mounts needed
+
+#### 3. gunicorn_coverage.py - Worker Hooks
+
+```python
+# server/gunicorn_coverage.py
+def worker_exit(server, worker):
+    """Save coverage when worker exits."""
+    cov = coverage.Coverage.current()
+    if cov:
+        cov.stop()
+        cov.save()  # Writes to /dev/shm with parallel=True
+```
+
+**Why worker_exit hook?**
+- Gunicorn workers are forked from master
+- Each worker accumulates its own coverage
+- Must save before worker terminates
+
+#### 4. coverage_server.py - HTTP Aggregator
+
+Combines all coverage files from `/dev/shm` and serves via HTTP:
+
+```python
+def _handle_coverage(self, label):
+    # Find all coverage files
+    pattern = os.path.join(COVERAGE_DATA_DIR, ".coverage*")
+    coverage_files = glob.glob(pattern)
+
+    # Combine into single dataset
+    combined = coverage.CoverageData()
+    for cov_file in coverage_files:
+        file_data = coverage.CoverageData(basename=cov_file)
+        file_data.read()
+        combined.update(file_data)
+
+    # Return as base64-encoded JSON
+    json_bytes = combined.dumps()
+    return base64.b64encode(json_bytes).decode('ascii')
+```
+
+#### 5. Application Execution
+
+Uses Python's `runpy` module to execute the target application:
 
 ```python
 # For scripts
@@ -123,20 +198,28 @@ This ensures:
 - Application behaves exactly as if run directly
 - Complete isolation (no imports pollute namespace)
 
-#### 3. HTTP Server
+### TMPDIR Environment Variable
 
-- Threaded HTTP server runs in daemon thread
-- Non-blocking (doesn't interfere with application)
-- Handles concurrent requests safely
+For Gunicorn to work with `readOnlyRootFilesystem: true`, set:
+
+```dockerfile
+ENV TMPDIR=/dev/shm
+```
+
+This makes Gunicorn use `/dev/shm` for its worker temp files, avoiding writes to `/tmp`.
 
 ### Coverage Data Serialization
 
-Coverage data is transmitted as base64-encoded JSON:
+Coverage data is transmitted as base64-encoded binary:
 
 ```python
-# Server side
-data = cov.get_data()
-json_bytes = data.dumps()  # Serialize to bytes
+# Server side (combines all files)
+combined = CoverageData()
+for f in coverage_files:
+    data = CoverageData(basename=f)
+    data.read()
+    combined.update(data)
+json_bytes = combined.dumps()  # Serialize to bytes
 json_b64 = base64.b64encode(json_bytes).decode('ascii')
 
 # Client side
@@ -146,7 +229,7 @@ cov_data.loads(coverage_json)  # Deserialize
 cov_data.write()  # Convert to SQLite
 ```
 
-**Format**: Python's `coverage` library uses a custom binary format (not JSON despite the name) that gets converted to SQLite database format.
+**Format**: Python's `coverage` library uses a custom binary format that gets converted to SQLite database format.
 
 ## Client Library Implementation
 
@@ -160,7 +243,7 @@ def get_pod_name(namespace: str, label_selector: str) -> str:
     config.load_kube_config()
     v1 = client.CoreV1Api()
     pods = v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector)
-    
+
     for pod in pods.items:
         if pod.status.phase == "Running":
             return pod.metadata.name
@@ -227,14 +310,14 @@ Coverage data from containers contains paths like `/app/app.py`, but local files
 ```python
 def _detect_container_paths(coverage_data, source_dir: str) -> dict:
     # Find files that don't exist (container paths)
-    container_files = [f for f in coverage_data.measured_files() 
+    container_files = [f for f in coverage_data.measured_files()
                        if not os.path.exists(f)]
-    
+
     # Build map of local files by basename
     local_files_map = {}
     for local_file in Path(source_dir).rglob("*.py"):
         local_files_map[local_file.name] = str(local_file)
-    
+
     # Match and create mappings
     path_mappings = {}
     for container_file in container_files:
@@ -243,7 +326,7 @@ def _detect_container_paths(coverage_data, source_dir: str) -> dict:
             container_dir = os.path.dirname(container_file) + "/"
             local_dir = os.path.dirname(local_files_map[filename]) + "/"
             path_mappings[container_dir] = local_dir
-    
+
     return path_mappings  # e.g., {'/app/': '/Users/user/project/'}
 ```
 
@@ -363,13 +446,13 @@ response = sock.recv(4096)
 def collect_coverage_after_tests(coverage_client, pod_name):
     # Tests run (coverage accumulates in pod)
     yield
-    
+
     # After all tests: collect coverage
     coverage_file = coverage_client.collect_coverage_from_pod(
         pod_name=pod_name,
         test_name="e2e_tests"
     )
-    
+
     # Generate reports
     coverage_client.generate_coverage_report("e2e_tests")
     coverage_client.generate_xml_report("e2e_tests")  # For Codecov
@@ -422,6 +505,59 @@ This allows tests to access the app directly without port-forwarding:
 - `GENERATE_HTML_REPORTS=false` (default) - Skip HTML in CI
 - `K8S_NAMESPACE=coverage-demo` - Target namespace
 
+## Multi-Process Coverage Flow
+
+### Gunicorn Lifecycle with Coverage
+
+```
+1. Container starts
+   └─ python coverage_server.py -m gunicorn ...
+
+2. coverage_server.py
+   ├─ Starts HTTP server on :9095 (daemon thread)
+   └─ Runs gunicorn via runpy.run_module()
+
+3. Gunicorn master starts
+   └─ sitecustomize.py triggers coverage.process_startup()
+
+4. Gunicorn forks worker(s)
+   └─ sitecustomize.py triggers coverage.process_startup() in each worker
+      └─ Each worker gets its own Coverage instance
+
+5. Worker handles requests
+   └─ Coverage accumulates for all executed code
+
+6. Worker exits (graceful shutdown, restart, etc.)
+   └─ gunicorn_coverage.py worker_exit hook:
+      └─ cov.stop() + cov.save() → /dev/shm/.coverage.<pid>
+
+7. HTTP GET /coverage requested
+   └─ coverage_server.py:
+      ├─ glob("/dev/shm/.coverage*")
+      ├─ Combine all files with CoverageData.update()
+      └─ Return base64-encoded combined data
+```
+
+### Why This Design?
+
+1. **sitecustomize.py** ensures coverage starts before any app code runs
+2. **parallel=True** in `.coveragerc` creates separate files per process
+3. **/dev/shm** is always writable (kernel-provided tmpfs)
+4. **worker_exit hook** saves coverage before process terminates
+5. **HTTP aggregation** combines files on-demand (no filesystem writes)
+
+### Triggering Worker Exit for Complete Coverage
+
+Coverage is saved when workers exit. To collect complete coverage:
+
+```bash
+# Option 1: Graceful reload (workers restart, save coverage)
+kubectl exec <pod> -- kill -HUP 1
+
+# Option 2: Just collect - workers save on graceful shutdown
+# (happens automatically at end of test run)
+```
+
 ## Performance Considerations
 
 ### Memory Usage
@@ -471,19 +607,37 @@ This allows tests to access the app directly without port-forwarding:
 - **Solution**: Check pod logs, verify `COVERAGE_PORT` setting
 
 **3. Low coverage percentage**
-- **Cause**: App initialization code not covered
-- **Solution**: Coverage starts with app, accumulates during all requests
+- **Cause**: App initialization code not covered, or worker coverage not saved
+- **Solution**: Ensure `gunicorn_coverage.py` hooks are configured correctly
 
 **4. Port-forward connection refused**
 - **Cause**: kubectl context wrong, namespace incorrect
 - **Solution**: Verify `kubectl get pods -n <namespace>`
 
+**5. "No usable temporary directory found" error**
+- **Cause**: Gunicorn can't write to `/tmp` with `readOnlyRootFilesystem: true`
+- **Solution**: Set `ENV TMPDIR=/dev/shm` in Dockerfile
+
+**6. Empty coverage data**
+- **Cause**: Coverage not started in worker processes
+- **Solution**: Verify `sitecustomize.py` is in site-packages and `COVERAGE_PROCESS_START` is set
+
+**7. Coverage files not found in /dev/shm**
+- **Cause**: Worker hasn't exited yet (coverage saved on worker exit)
+- **Solution**: Wait for worker to process requests, or restart Gunicorn gracefully
+
+**8. "unable to open database file" error**
+- **Cause**: Trying to write combined coverage to read-only filesystem
+- **Solution**: Update to latest `coverage_server.py` which combines in-memory
+
 ### Debug Tips
 
 1. **Check pod logs**: `kubectl logs <pod-name> -n <namespace>`
 2. **Test coverage endpoint**: `kubectl port-forward <pod> 9095:9095` then `curl http://localhost:9095/health`
-3. **Verify coverage data**: Check `.coverage_<test>` file exists and is non-empty
-4. **Enable verbose mode**: Use `-s` flag with pytest to see client logs
+3. **List coverage files**: `kubectl exec <pod> -- ls -la /dev/shm/`
+4. **Verify environment**: `kubectl exec <pod> -- env | grep COVERAGE`
+5. **Check sitecustomize**: `kubectl exec <pod> -- python -c "import sitecustomize; print('OK')"`
+6. **Enable verbose mode**: Use `-s` flag with pytest to see client logs
 
 ## Future Enhancements
 
@@ -499,6 +653,8 @@ Possible improvements:
 ## References
 
 - [Python coverage.py documentation](https://coverage.readthedocs.io/)
+- [coverage.py multiprocessing support](https://coverage.readthedocs.io/en/latest/subprocess.html)
 - [Kubernetes Python client](https://github.com/kubernetes-client/python)
+- [Gunicorn hooks documentation](https://docs.gunicorn.org/en/stable/settings.html#server-hooks)
 - [go-coverage-http (inspiration)](https://github.com/psturc/go-coverage-http)
 
