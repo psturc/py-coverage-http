@@ -59,17 +59,14 @@ This document provides technical details about the implementation of py-coverage
 │  Test Runner / CI Environment                                            │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │ CoverPort CLI                                                      │ │
+│  │ CoverPort CLI (coverport collect)                                   │ │
 │  │                                                                     │ │
-│  │  $ coverport collect                                               │ │
-│  │    • Auto pod discovery by label selector                          │ │
-│  │    • Built-in port-forwarding                                      │ │
-│  │    • HTTP GET /coverage → saves .coverage file                     │ │
-│  │                                                                     │ │
-│  │  $ coverport process                                               │ │
-│  │    • Auto-detects Python coverage format                           │ │
-│  │    • Runs: python -m coverage xml                                  │ │
-│  │    • Generates XML (Codecov) and HTML reports                      │ │
+│  │  1. Auto pod discovery by label selector                           │ │
+│  │  2. Built-in port-forwarding                                       │ │
+│  │  3. Detects Python coverage server via /health                     │ │
+│  │  4. Triggers coverage save (SIGHUP to Gunicorn)                    │ │
+│  │  5. HTTP GET /coverage → saves .coverage file                      │ │
+│  │  6. Exec into pod: runs coverage xml → fetches coverage.xml        │ │
 │  └────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -219,34 +216,31 @@ cov_data.write()  # Convert to SQLite
 
 ### How CoverPort Works with Python
 
-**Collection (`coverport collect`):**
+For Python, the entire workflow is handled by `coverport collect` — no separate `process` step is needed. This is because CoverPort executes Python commands inside the target pod (where Python and the `coverage` package are already installed), rather than requiring Python in the CLI container itself.
+
+**`coverport collect` flow for Python:**
 1. Discovers pods using Kubernetes API (label selector)
 2. Establishes port-forwarding to coverage port (9095)
-3. HTTP GET `/coverage?name=<test_name>`
-4. Detects Python format by presence of `"coverage_data"` field in response
-5. Decodes base64 data and saves as `.coverage` file (SQLite format)
-
-**Processing (`coverport process`):**
-1. Detects Python format by presence of `.coverage` file
-2. Invokes `python -m coverage xml` to generate Codecov-compatible XML
-3. Optionally generates HTML report with `python -m coverage html`
+3. Checks `/health` endpoint — detects Python coverage server
+4. If no coverage files exist yet, triggers a save via `/coverage/save` (sends SIGHUP to Gunicorn, causing workers to restart and save coverage data)
+5. HTTP GET `/coverage?name=<test_name>` — fetches combined coverage data
+6. Detects Python format by presence of `"coverage_data"` field in response
+7. Decodes base64 data and saves as `.coverage` file
+8. Exec into the pod: runs a Python script that combines `/dev/shm` files and generates `coverage.xml` (Cobertura format)
+9. Fetches the generated `coverage.xml` from the pod and saves it locally
 
 ### CoverPort CLI Usage
 
 ```bash
-# Collect coverage from Python app
+# Collect coverage and generate XML (single command)
 coverport collect \
   --namespace default \
   --label-selector app=my-app \
   --coverage-port 9095 \
   --output-dir ./coverage-data
-
-# Process and generate reports
-coverport process \
-  --input-dir ./coverage-data \
-  --output coverage.xml \
-  --generate-html
 ```
+
+The output directory will contain `coverage.xml` ready for upload to Codecov.
 
 ### Python Response Format
 
@@ -408,16 +402,10 @@ This allows tests to access the app directly without port-forwarding:
       --label-selector app=my-app \
       --output-dir ./coverage-data
 
-- name: Process Coverage
-  run: |
-    coverport process \
-      --input-dir ./coverage-data \
-      --output coverage.xml
-
 - name: Upload to Codecov
   uses: codecov/codecov-action@v4
   with:
-    files: ./coverage.xml
+    directory: ./coverage-data
 ```
 
 See [`.github/workflows/test.yaml`](.github/workflows/test.yaml) for a complete working example.

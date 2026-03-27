@@ -116,40 +116,41 @@ Use [CoverPort CLI](https://github.com/konflux-ci/coverport) to collect coverage
 # Install CoverPort CLI
 go install github.com/konflux-ci/coverport/cli@latest
 
-# Discover pods and collect coverage (auto port-forwarding)
+# Discover pods, collect coverage, and generate XML report (all in one step)
 coverport collect \
   --namespace default \
   --label-selector app=my-app \
   --coverage-port 9095 \
   --output-dir ./coverage-data
-
-# Process coverage and generate XML report for Codecov
-coverport process \
-  --input-dir ./coverage-data \
-  --output coverage.xml \
-  --generate-html
 ```
+
+For Python, `coverport collect` handles everything: it triggers a coverage save, fetches
+the data, and generates Cobertura XML by executing `coverage xml` inside the target pod
+(where Python and the `coverage` package are already installed). No separate `process`
+step is needed.
 
 **CoverPort CLI features:**
 - Auto pod discovery by label selector
 - Built-in port-forwarding (no manual setup)
-- Auto-detects Python coverage format
-- Generates XML (Codecov) and HTML reports
+- Auto-detects Python coverage server
+- Triggers coverage save and generates XML automatically
 - Works with Go, Python, and Node.js
 
 ### 3. Upload to Codecov (Optional)
 
 ```yaml
 # .github/workflows/test.yaml
-- name: Collect and process coverage
+- name: Collect coverage
   run: |
-    coverport collect --namespace default --label-selector app=my-app --output-dir ./coverage-data
-    coverport process --input-dir ./coverage-data --output coverage.xml
+    coverport collect \
+      --namespace default \
+      --label-selector app=my-app \
+      --output-dir ./coverage-data
 
 - name: Upload coverage to Codecov
   uses: codecov/codecov-action@v4
   with:
-    files: ./coverage.xml
+    directory: ./coverage-data
     token: ${{ secrets.CODECOV_TOKEN }}
 ```
 
@@ -175,16 +176,11 @@ kubectl wait --for=condition=ready pod -l app=coverage-demo --timeout=60s
 # Run E2E tests against the app
 cd test && python -m pytest test_e2e.py -v -s
 
-# Collect coverage with CoverPort CLI
+# Collect coverage with CoverPort CLI (generates XML automatically)
 coverport collect \
   --namespace coverage-demo \
   --label-selector app=coverage-demo \
   --output-dir ./coverage-output
-
-# Process and generate reports
-coverport process \
-  --input-dir ./coverage-output \
-  --output coverage.xml
 ```
 
 ### Example Files
@@ -255,26 +251,25 @@ This ensures coverage is collected from all worker processes.
 [CoverPort CLI](https://github.com/konflux-ci/coverport) provides a unified interface for collecting coverage from Go, Python, and Node.js applications:
 
 ```bash
-# Collect coverage (auto discovers pods, handles port-forwarding)
+# Collect coverage and generate XML (all in one step for Python)
 coverport collect \
   --namespace default \
   --label-selector app=my-app \
   --coverage-port 9095 \
   --output-dir ./coverage-data
-
-# Process and convert to XML (auto-detects Python format)
-coverport process \
-  --input-dir ./coverage-data \
-  --output coverage.xml \
-  --generate-html
 ```
+
+For Python, the `collect` command handles the full workflow: it auto-detects the Python
+coverage server, triggers a save, fetches coverage data, and generates Cobertura XML by
+running `coverage xml` inside the target pod. The output directory will contain
+`coverage.xml` ready for upload to Codecov.
 
 **Benefits**:
 - Unified tool for Go, Python, Node.js
-- Auto-detects coverage format
+- Auto-detects Python coverage server
 - Built-in port-forwarding (no manual setup)
-- No Python dependencies needed for collection
-- Generates Codecov-compatible XML
+- No Python needed in the CLI container (uses Python from the target pod)
+- Generates Codecov-compatible XML automatically
 
 ## How It Works
 
@@ -305,8 +300,9 @@ coverport process \
 │  Test Runner / CI Environment                                │
 │                                                              │
 │  CoverPort CLI                                               │
-│  ├─ coverport collect → fetches .coverage data              │
-│  └─ coverport process → generates XML/HTML reports          │
+│  └─ coverport collect                                        │
+│     ├─ fetches .coverage data via HTTP                      │
+│     └─ generates XML via exec into the pod                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
