@@ -29,6 +29,21 @@ spec:
         - containerPort: 8080
           name: http
           protocol: TCP
+        - containerPort: 9095
+          name: coverage
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: coverage
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 3
+          periodSeconds: 5
         securityContext:
           readOnlyRootFilesystem: true
           runAsNonRoot: true
@@ -56,6 +71,8 @@ spec:
   - name: http
     port: 8080
     targetPort: 8080
-    nodePort: 30080  # Fixed port for Kind mapping
+    nodePort: 30080
+  # NOTE: Coverage port (9095) intentionally NOT exposed via Service
+  # CoverPort CLI uses port-forwarding directly to the pod
   type: NodePort
 

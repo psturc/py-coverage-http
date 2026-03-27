@@ -63,6 +63,8 @@ class CoverageHandler(BaseHTTPRequestHandler):
             self._handle_coverage(label)
         elif path == "/health":
             self._handle_health()
+        elif path == "/coverage/save":
+            self._handle_save()
         elif path == "/coverage/reset":
             self._handle_reset()
         elif path == "/coverage/files":
@@ -150,6 +152,42 @@ class CoverageHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode()
 
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_save(self):
+        """Trigger coverage save by sending SIGHUP to PID 1 (Gunicorn master).
+
+        This restarts Gunicorn workers, which triggers the worker_exit hook
+        in gunicorn_coverage.py, saving each worker's coverage data to /dev/shm.
+        """
+        import signal
+        import time
+
+        print(f"{PRINT_PREFIX} Coverage save triggered via /coverage/save", flush=True)
+
+        try:
+            os.kill(1, signal.SIGHUP)
+            time.sleep(3)
+
+            pattern = os.path.join(COVERAGE_DATA_DIR, ".coverage*")
+            file_count = len(glob.glob(pattern))
+            print(f"{PRINT_PREFIX} After save: {file_count} coverage file(s) in {COVERAGE_DATA_DIR}", flush=True)
+
+            payload = {
+                "status": "ok",
+                "message": "Coverage save triggered (SIGHUP sent to Gunicorn master)",
+                "coverage_files": file_count,
+            }
+            self.send_response(200)
+        except Exception as e:
+            print(f"{PRINT_PREFIX} Error triggering save: {e}", flush=True)
+            payload = {"status": "error", "message": str(e), "coverage_files": 0}
+            self.send_response(500)
+
+        body = json.dumps(payload).encode()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

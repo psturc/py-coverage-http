@@ -19,7 +19,7 @@ Traditional coverage collection requires:
 * ✅ No volume mounts required
 * ✅ No deployment manifest changes
 * ✅ Just download instrumentation files during build
-* ✅ Collect coverage via HTTP with provided client library
+* ✅ Collect coverage via HTTP using [CoverPort CLI](https://github.com/konflux-ci/coverport)
 * ✅ Works with any Python framework (Flask, Django, FastAPI, etc.)
 * ✅ **Supports Gunicorn and multi-process applications**
 
@@ -27,14 +27,14 @@ Traditional coverage collection requires:
 
 1. **Build time**: Download instrumentation files and include in your test Docker image
 2. **Runtime**: Coverage collection starts automatically in all processes (including Gunicorn workers)
-3. **Test time**: Client library collects coverage via HTTP port-forwarding
-4. **Result**: Coverage reports generated automatically
+3. **Test time**: Collect coverage via HTTP using [CoverPort CLI](https://github.com/konflux-ci/coverport)
+4. **Result**: Coverage reports generated automatically (XML for Codecov, HTML for viewing)
 
 ## Features
 
 * 🎯 **Multi-Process Support** - Works with Gunicorn, uWSGI, and other WSGI servers
 * 🚀 **HTTP Coverage Server** - Automatically exposes combined coverage via HTTP
-* 🔌 **Client Library** - Collects coverage via kubectl port-forward or native Python
+* 🔌 **CoverPort CLI Integration** - Collect and process coverage with unified CLI tool
 * 🔍 **Pod Discovery** - Automatically find pods by label selector (no hardcoded names!)
 * 🗺️ **Auto Path Remapping** - Automatically maps container paths to local paths
 * 📊 **Report Generation** - Generate text, HTML, and XML (Codecov) reports
@@ -110,43 +110,46 @@ CMD ["python", "/opt/coverage_server.py", "-m", "gunicorn", \
 
 ### 2. Collect Coverage from Tests
 
-```python
-from client.coverage_client import CoverageClient
+Use [CoverPort CLI](https://github.com/konflux-ci/coverport) to collect coverage. It supports Go, Python, and Node.js applications with a unified interface.
 
-# Create client
-client = CoverageClient(namespace="default", output_dir="./coverage-output")
+```bash
+# Install CoverPort CLI
+go install github.com/konflux-ci/coverport/cli@latest
 
-# Discover pod automatically by label (no hardcoded names!)
-pod_name = CoverageClient.get_pod_name("default", label_selector="app=my-app")
+# Discover pods and collect coverage (auto port-forwarding)
+coverport collect \
+  --namespace default \
+  --label-selector app=my-app \
+  --coverage-port 9095 \
+  --output-dir ./coverage-data
 
-# Collect coverage from pod
-client.collect_coverage_from_pod(
-    pod_name=pod_name,
-    test_name="my-test",
-    coverage_port=9095,
-    use_kubectl=False  # Native Python (no kubectl binary needed!)
-)
-
-# Generate reports (paths automatically remapped from container to local)
-client.generate_coverage_report("my-test")  # Text report
-client.generate_html_report("my-test")      # HTML report
-client.generate_xml_report("my-test")       # XML for Codecov
+# Process coverage and generate XML report for Codecov
+coverport process \
+  --input-dir ./coverage-data \
+  --output coverage.xml \
+  --generate-html
 ```
 
-**Key features:**
-- 🔍 Auto pod discovery (no hardcoded names)
-- 🗺️ Auto path remapping (container → local paths)
-- 🎭 Auto excludes instrumentation code
-- 📊 Multiple report formats (text, HTML, XML)
+**CoverPort CLI features:**
+- Auto pod discovery by label selector
+- Built-in port-forwarding (no manual setup)
+- Auto-detects Python coverage format
+- Generates XML (Codecov) and HTML reports
+- Works with Go, Python, and Node.js
 
 ### 3. Upload to Codecov (Optional)
 
 ```yaml
 # .github/workflows/test.yaml
+- name: Collect and process coverage
+  run: |
+    coverport collect --namespace default --label-selector app=my-app --output-dir ./coverage-data
+    coverport process --input-dir ./coverage-data --output coverage.xml
+
 - name: Upload coverage to Codecov
   uses: codecov/codecov-action@v4
   with:
-    files: ./test/coverage-output/coverage.xml
+    files: ./coverage.xml
     token: ${{ secrets.CODECOV_TOKEN }}
 ```
 
@@ -167,16 +170,22 @@ podman build --target test -t localhost/py-coverage-http:test .
 kubectl apply -f k8s-deployment.yaml
 
 # Wait for pod to be ready
-kubectl wait --for=condition=ready pod/coverage-demo --timeout=60s
+kubectl wait --for=condition=ready pod -l app=coverage-demo --timeout=60s
 
-# Run E2E tests (will collect coverage automatically)
+# Run E2E tests against the app
 cd test && python -m pytest test_e2e.py -v -s
-```
 
-The E2E tests will:
-* Execute requests against the running pod
-* Collect coverage data via port-forwarding
-* Generate text and HTML reports in `./coverage-output/`
+# Collect coverage with CoverPort CLI
+coverport collect \
+  --namespace coverage-demo \
+  --label-selector app=coverage-demo \
+  --output-dir ./coverage-output
+
+# Process and generate reports
+coverport process \
+  --input-dir ./coverage-output \
+  --output coverage.xml
+```
 
 ### Example Files
 
@@ -187,8 +196,7 @@ The E2E tests will:
 * `server/.coveragerc` - Coverage configuration for multiprocessing
 * `Dockerfile` - Multi-stage build with test target
 * `k8s-example.yaml` - Kubernetes deployment manifest (works with readOnlyRootFilesystem)
-* `test/test_e2e.py` - E2E tests with coverage collection
-* `client/coverage_client.py` - Client library for collecting coverage
+* `test/test_e2e.py` - E2E tests that exercise the application endpoints
 
 ## API Endpoints
 
@@ -242,39 +250,31 @@ python coverage_server.py -m gunicorn \
 
 This ensures coverage is collected from all worker processes.
 
-## Client Library Options
+## Coverage Collection
 
-### Pod Discovery
+[CoverPort CLI](https://github.com/konflux-ci/coverport) provides a unified interface for collecting coverage from Go, Python, and Node.js applications:
 
-The `CoverageClient` provides a utility method to discover pods automatically by label:
+```bash
+# Collect coverage (auto discovers pods, handles port-forwarding)
+coverport collect \
+  --namespace default \
+  --label-selector app=my-app \
+  --coverage-port 9095 \
+  --output-dir ./coverage-data
 
-```python
-# Find pod by label selector
-pod_name = CoverageClient.get_pod_name(
-    namespace="default",
-    label_selector="app=my-app"
-)
-
-# Use with coverage collection
-client.collect_coverage_from_pod(pod_name=pod_name, test_name="test1")
+# Process and convert to XML (auto-detects Python format)
+coverport process \
+  --input-dir ./coverage-data \
+  --output coverage.xml \
+  --generate-html
 ```
 
 **Benefits**:
-- ✅ No hardcoded pod names
-- ✅ Works across deployments (pod names change with each deployment)
-- ✅ Standard Kubernetes label selectors
-- ✅ Finds first running pod automatically
-
-### Port-Forwarding Methods
-
-The client supports two methods:
-
-| Method | Pros | Cons |
-|--------|------|------|
-| **kubectl binary** (default) | Battle-tested, reliable | Requires kubectl binary |
-| **Native Python** (`use_kubectl=False`) | No binary deps, pure Python | Requires `kubernetes` package |
-
-Both methods work reliably. Use `use_kubectl=False` for pure Python environments.
+- Unified tool for Go, Python, Node.js
+- Auto-detects coverage format
+- Built-in port-forwarding (no manual setup)
+- No Python dependencies needed for collection
+- Generates Codecov-compatible XML
 
 ## How It Works
 
@@ -300,13 +300,13 @@ Both methods work reliably. Use `use_kubectl=False` for pure Python environments
 │   coverage_server.py (HTTP endpoint :9095)                   │
 │   └─ GET /coverage → combines files → returns JSON          │
 └─────────────────────────────────────────────────────────────┘
-           │ Port-forward (kubectl or native Python)
+           │ Port-forward (auto-managed)
 ┌──────────▼──────────────────────────────────────────────────┐
 │  Test Runner / CI Environment                                │
-│  CoverageClient                                              │
-│  ├─ Fetch combined coverage via HTTP                        │
-│  ├─ Auto-remap container paths to local paths               │
-│  └─ Generate reports (text, HTML, XML)                      │
+│                                                              │
+│  CoverPort CLI                                               │
+│  ├─ coverport collect → fetches .coverage data              │
+│  └─ coverport process → generates XML/HTML reports          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -319,7 +319,6 @@ For technical details, see [TECHNICAL.md](TECHNICAL.md).
 - **[README.md](README.md)** (this file) - Quick start and usage guide
 - **[TECHNICAL.md](TECHNICAL.md)** - Architecture, implementation details, troubleshooting
 - **[.github/workflows/test.yaml](.github/workflows/test.yaml)** - CI/CD example with Codecov
-- **[test/test_e2e.py](test/test_e2e.py)** - Complete E2E test example
 
 ## License
 

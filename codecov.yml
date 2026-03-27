@@ -15,7 +15,7 @@ coverage:
       default:
         target: auto
 
-# Path remapping is handled by the coverage client
+# Path remapping is handled by CoverPort CLI
 # XML reports already contain correct local paths
 
 comment:
