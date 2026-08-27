@@ -54,7 +54,7 @@ jobs:
             -v /tmp/kubeconfig:/kubeconfig:ro \
             -v $PWD/coverage-output:/workspace/coverage-output \
             -e KUBECONFIG=/kubeconfig \
-            quay.io/redhat-user-workloads/rh-konflux-devprod-tenant/coverport-cli:on-pr-900280c590fd410bbf322aeba520e4ee4946b8b5 \
+            quay.io/konflux-ci/konflux-devprod/coverport-cli \
             collect \
               --namespace=coverage-demo \
               --label-selector="app=coverage-demo" \
